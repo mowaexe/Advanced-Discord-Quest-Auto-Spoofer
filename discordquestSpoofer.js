@@ -13,53 +13,106 @@
     const FluxDispatcher = getModule(x => x?.exports?.Z?.__proto__?.flushWaitQueue)?.Z;
     const api = getModule(x => x?.exports?.tn?.get)?.tn;
 
+    // 🔄 Per-quest timer management
+    const activeTimers = {};
+    const createQuestTimer = (questId, label, seconds) => {
+        const box = document.createElement("div");
+        box.id = `quest-timer-${questId}`;
+        Object.assign(box.style, {
+            position: "fixed",
+            top: `${30 + Object.keys(activeTimers).length * 60}px`,
+            left: "10px",
+            background: "#2f3136",
+            color: "#fff",
+            padding: "6px 12px",
+            borderRadius: "10px",
+            fontSize: "14px",
+            fontWeight: "bold",
+            zIndex: 9999,
+            boxShadow: "0 0 10px rgba(0,0,0,0.4)",
+            cursor: "move",
+            userSelect: "none",
+            minWidth: "140px",
+        });
+        box.innerText = `⏳ ${label}: ${seconds}s`;
+        document.body.appendChild(box);
+        activeTimers[questId] = { box, remaining: seconds };
+
+        let dragging = false, offsetX = 0, offsetY = 0;
+        box.addEventListener("mousedown", (e) => {
+            dragging = true;
+            offsetX = e.clientX - box.offsetLeft;
+            offsetY = e.clientY - box.offsetTop;
+        });
+        document.addEventListener("mouseup", () => dragging = false);
+        document.addEventListener("mousemove", (e) => {
+            if (dragging) {
+                box.style.left = `${e.clientX - offsetX}px`;
+                box.style.top = `${e.clientY - offsetY}px`;
+            }
+        });
+
+        const interval = setInterval(() => {
+            if (!activeTimers[questId]) return clearInterval(interval);
+            activeTimers[questId].remaining--;
+            if (activeTimers[questId].remaining <= 0) {
+                box.innerText = `✅ ${label} done`;
+                clearInterval(interval);
+                setTimeout(() => box.remove(), 3000);
+                delete activeTimers[questId];
+            } else {
+                box.innerText = `⏳ ${label}: ${activeTimers[questId].remaining}s`;
+            }
+        }, 1000);
+    };
+
     const allQuests = [...QuestsStore.quests.values()];
-    const activeQuests = allQuests.filter(x =>
-        x?.id !== "1248385850622869556" &&
-        x.userStatus?.enrolledAt &&
-        !x.userStatus?.completedAt &&
-        new Date(x?.config?.expiresAt).getTime() > Date.now()
+    const activeQuests = allQuests.filter(q =>
+        q?.id !== "1248385850622869556" &&
+        q.userStatus?.enrolledAt &&
+        !q.userStatus?.completedAt &&
+        new Date(q?.config?.expiresAt).getTime() > Date.now()
     );
 
     if (activeQuests.length === 0) {
-        console.log("No available uncompleted quests found, Mowa!");
+        console.log("No available uncompleted quests found.");
         return;
     }
 
-    // Interactive menu
     const taskTypes = ["WATCH_VIDEO", "WATCH_VIDEO_ON_MOBILE", "PLAY_ON_DESKTOP", "STREAM_ON_DESKTOP", "PLAY_ACTIVITY"];
     const enabledTasks = [];
 
     console.clear();
     console.log("========= Select Tasks to Spoof =========");
-    taskTypes.forEach((task, i) => {
-        const checked = confirm(`Enable spoofing for ${task.replaceAll("_", " ")}?`);
-        if (checked) enabledTasks.push(task);
-    });
+    for (const task of taskTypes) {
+        if (confirm(`Enable spoofing for ${task.replaceAll("_", " ")}?`)) {
+            enabledTasks.push(task);
+        }
+    }
     console.log("=========================================");
 
     for (const quest of activeQuests) {
-        const pid = Math.floor(Math.random() * 30000) + 1000;
-
         const applicationId = quest.config?.application?.id;
         const applicationName = quest.config?.application?.name;
         const taskConfig = quest.config.taskConfig ?? quest.config.taskConfigV2;
-        const taskName = taskTypes.find(x => taskConfig.tasks[x] != null);
+        const taskName = taskTypes.find(t => taskConfig.tasks[t]);
 
         if (!enabledTasks.includes(taskName)) {
-            console.log(`Skipping quest: ${applicationName} - ${taskName}`);
+            console.log(`Skipping: ${applicationName} (${taskName})`);
             continue;
         }
 
         const secondsNeeded = taskConfig.tasks[taskName].target;
         let secondsDone = quest.userStatus?.progress?.[taskName]?.value ?? 0;
         const isApp = typeof DiscordNative !== "undefined";
+        const pid = Math.floor(Math.random() * 30000) + 1000;
 
-        if (taskName === "WATCH_VIDEO" || taskName === "WATCH_VIDEO_ON_MOBILE") {
+        createQuestTimer(quest.id, applicationName, secondsNeeded - secondsDone);
+
+        if (["WATCH_VIDEO", "WATCH_VIDEO_ON_MOBILE"].includes(taskName)) {
             const maxFuture = 10, speed = 7, interval = 1;
             const enrolledAt = new Date(quest.userStatus.enrolledAt).getTime();
-
-            let fn = async () => {
+            (async () => {
                 while (true) {
                     const maxAllowed = Math.floor((Date.now() - enrolledAt) / 1000) + maxFuture;
                     const diff = maxAllowed - secondsDone;
@@ -72,94 +125,77 @@
                         secondsDone = Math.min(secondsNeeded, timestamp);
                     }
                     if (timestamp >= secondsNeeded) break;
-                    await new Promise(resolve => setTimeout(resolve, interval * 1000));
+                    await new Promise(r => setTimeout(r, interval * 1000));
                 }
-                console.log(`✅ Completed video quest for ${applicationName}`);
-            };
-            fn();
-            console.log(`▶️ Spoofing video: ${applicationName}`);
+                console.log(`✅ Completed video quest: ${applicationName}`);
+            })();
 
         } else if (taskName === "PLAY_ON_DESKTOP") {
             if (!isApp) {
                 console.log(`⚠️ Use the desktop app for ${applicationName}`);
                 continue;
             }
-            api.get({ url: `/applications/public?application_ids=${applicationId}` }).then(res => {
-                const appData = res.body[0];
-                const exeName = appData.executables.find(x => x.os === "win32").name.replace(">", "");
+            const res = await api.get({ url: `/applications/public?application_ids=${applicationId}` });
+            const appData = res.body[0];
+            const exeName = appData.executables.find(x => x.os === "win32").name.replace(">", "");
+            const fakeGame = {
+                cmdLine: `C:\\Program Files\\${appData.name}\\${exeName}`,
+                exeName,
+                exePath: `c:/program files/${appData.name.toLowerCase()}/${exeName}`,
+                hidden: false,
+                isLauncher: false,
+                id: applicationId,
+                name: appData.name,
+                pid: pid,
+                pidPath: [pid],
+                processName: appData.name,
+                start: Date.now(),
+            };
 
-                const fakeGame = {
-                    cmdLine: `C:\\Program Files\\${appData.name}\\${exeName}`,
-                    exeName,
-                    exePath: `c:/program files/${appData.name.toLowerCase()}/${exeName}`,
-                    hidden: false,
-                    isLauncher: false,
-                    id: applicationId,
-                    name: appData.name,
-                    pid: pid,
-                    pidPath: [pid],
-                    processName: appData.name,
-                    start: Date.now(),
-                };
+            const realGames = RunningGameStore.getRunningGames();
+            const realGetRunningGames = RunningGameStore.getRunningGames;
+            const realGetGameForPID = RunningGameStore.getGameForPID;
 
-                const realGames = RunningGameStore.getRunningGames();
-                const fakeGames = [fakeGame];
-                const realGetRunningGames = RunningGameStore.getRunningGames;
-                const realGetGameForPID = RunningGameStore.getGameForPID;
-                RunningGameStore.getRunningGames = () => fakeGames;
-                RunningGameStore.getGameForPID = pid => fakeGames.find(x => x.pid === pid);
-                FluxDispatcher.dispatch({ type: "RUNNING_GAMES_CHANGE", removed: realGames, added: [fakeGame], games: fakeGames });
+            RunningGameStore.getRunningGames = () => [fakeGame];
+            RunningGameStore.getGameForPID = pid => [fakeGame].find(g => g.pid === pid);
+            FluxDispatcher.dispatch({ type: "RUNNING_GAMES_CHANGE", removed: realGames, added: [fakeGame], games: [fakeGame] });
 
-                const fn = data => {
-                    let progress = quest.config.configVersion === 1
-                        ? data.userStatus.streamProgressSeconds
-                        : Math.floor(data.userStatus.progress.PLAY_ON_DESKTOP.value);
-                    console.log(`Quest progress: ${progress}/${secondsNeeded}`);
-                    if (progress >= secondsNeeded) {
-                        console.log(`✅ Completed desktop quest: ${applicationName}`);
-                        RunningGameStore.getRunningGames = realGetRunningGames;
-                        RunningGameStore.getGameForPID = realGetGameForPID;
-                        FluxDispatcher.dispatch({ type: "RUNNING_GAMES_CHANGE", removed: [fakeGame], added: [], games: [] });
-                        FluxDispatcher.unsubscribe("QUESTS_SEND_HEARTBEAT_SUCCESS", fn);
-                    }
-                };
-                FluxDispatcher.subscribe("QUESTS_SEND_HEARTBEAT_SUCCESS", fn);
-                console.log(`▶️ Spoofing game: ${applicationName}`);
-            });
+            const fn = data => {
+                const progress = Math.floor(data.userStatus.progress.PLAY_ON_DESKTOP.value);
+                if (progress >= secondsNeeded) {
+                    console.log(`✅ Completed: ${applicationName}`);
+                    RunningGameStore.getRunningGames = realGetRunningGames;
+                    RunningGameStore.getGameForPID = realGetGameForPID;
+                    FluxDispatcher.dispatch({ type: "RUNNING_GAMES_CHANGE", removed: [fakeGame], added: [], games: [] });
+                    FluxDispatcher.unsubscribe("QUESTS_SEND_HEARTBEAT_SUCCESS", fn);
+                }
+            };
+            FluxDispatcher.subscribe("QUESTS_SEND_HEARTBEAT_SUCCESS", fn);
 
         } else if (taskName === "STREAM_ON_DESKTOP") {
             if (!isApp) {
                 console.log(`⚠️ Use the desktop app for ${applicationName}`);
                 continue;
             }
-
             const realFunc = ApplicationStreamingStore.getStreamerActiveStreamMetadata;
-            ApplicationStreamingStore.getStreamerActiveStreamMetadata = () => ({
-                id: applicationId,
-                pid,
-                sourceName: null
-            });
+            ApplicationStreamingStore.getStreamerActiveStreamMetadata = () => ({ id: applicationId, pid, sourceName: null });
 
             const fn = data => {
-                const progress = quest.config.configVersion === 1
-                    ? data.userStatus.streamProgressSeconds
-                    : Math.floor(data.userStatus.progress.STREAM_ON_DESKTOP.value);
-                console.log(`Quest progress: ${progress}/${secondsNeeded}`);
+                const progress = Math.floor(data.userStatus.progress.STREAM_ON_DESKTOP.value);
                 if (progress >= secondsNeeded) {
-                    console.log(`✅ Completed stream quest: ${applicationName}`);
+                    console.log(`✅ Completed: ${applicationName}`);
                     ApplicationStreamingStore.getStreamerActiveStreamMetadata = realFunc;
                     FluxDispatcher.unsubscribe("QUESTS_SEND_HEARTBEAT_SUCCESS", fn);
                 }
             };
             FluxDispatcher.subscribe("QUESTS_SEND_HEARTBEAT_SUCCESS", fn);
-            console.log(`▶️ Spoofing stream: ${applicationName}`);
 
         } else if (taskName === "PLAY_ACTIVITY") {
             const channelId = ChannelStore.getSortedPrivateChannels()[0]?.id ??
                 Object.values(GuildChannelStore.getAllGuilds()).find(x => x?.VOCAL?.length > 0)?.VOCAL[0]?.channel?.id;
             const streamKey = `call:${channelId}:1`;
 
-            let fn = async () => {
+            (async () => {
                 console.log(`▶️ Spoofing activity: ${applicationName}`);
                 while (true) {
                     const res = await api.post({
@@ -167,8 +203,6 @@
                         body: { stream_key: streamKey, terminal: false }
                     });
                     const progress = res.body.progress.PLAY_ACTIVITY.value;
-                    console.log(`Quest progress: ${progress}/${secondsNeeded}`);
-                    await new Promise(resolve => setTimeout(resolve, 20 * 1000));
                     if (progress >= secondsNeeded) {
                         await api.post({
                             url: `/quests/${quest.id}/heartbeat`,
@@ -176,10 +210,10 @@
                         });
                         break;
                     }
+                    await new Promise(r => setTimeout(r, 20000));
                 }
                 console.log(`✅ Completed activity quest: ${applicationName}`);
-            };
-            fn();
+            })();
         }
     }
 })();
